@@ -23,8 +23,22 @@ include ../../../build/makelib/imagelight.mk
 
 img.build:
 	@$(INFO) Family base image to build: $(IMAGE)
-	@$(INFO) Building image $${IMAGE}; \
-	$(MAKE) BUILD_ARGS="--load ${BUILD_ARGS}" IMAGE=$${IMAGE} XPKG_REG_ORGS=$(XPKG_REG_ORGS) img.build.shared; \
+	@$(INFO) Building image $(IMAGE); \
+	# Buildx is required to cross-build linux/amd64 and linux/arm64. Export its
+	# result as a Docker archive, then import it into Docker's image store for
+	# xpkg batch. The classic builder silently produces the host architecture
+	# for both tags on Apple Silicon.
+	image_tar="$(IMAGE_TEMP_DIR)/image.tar"; \
+	rm -f "$${image_tar}"; \
+	$(MAKE) BUILD_ARGS="--output=type=docker,dest=$${image_tar} ${BUILD_ARGS}" IMAGE=$(IMAGE) XPKG_REG_ORGS=$(XPKG_REG_ORGS) img.build.shared && \
+	{ docker image rm -f "$(IMAGE):latest" >/dev/null 2>&1 || true; } && \
+	docker load -i "$${image_tar}" && \
+	rm -f "$${image_tar}" && \
+	actual_arch=$$(docker image inspect "$(IMAGE):latest" --format '{{.Architecture}}'); \
+	if [ "$${actual_arch}" != "$(ARCH)" ]; then \
+		echo "built $(IMAGE):latest with architecture $${actual_arch}, expected $(ARCH)" >&2; \
+		exit 1; \
+	fi && \
 	if [[ "$${LOAD_PACKAGES}" == "true" ]]; then \
 		$(MAKE) batch-process SUBPACKAGES="$(SUBPACKAGES)" XPKG_DIR=$(XPKG_DIR) XPKG_IGNORE=$(XPKG_IGNORE) BATCH_PLATFORMS=$(PLATFORM) BUILD_ONLY=true STORE_PACKAGES="$$(tr ' ' ',' <<< "$(SUBPACKAGES)")" && \
 		for s in $(SUBPACKAGES); do \
@@ -36,6 +50,15 @@ img.build:
 
 img.build.shared:
 	@cp Dockerfile $(IMAGE_TEMP_DIR) || $(FAIL)
+	@# CA_BUNDLE_PATH is exported by the corporate shell profile. Supplying an
+	@# alternate CORPORATE_CA_BUNDLE supports CI and nonstandard local setups.
+	@if [ -n "$(CORPORATE_CA_BUNDLE)" ]; then \
+		cp "$(CORPORATE_CA_BUNDLE)" $(IMAGE_TEMP_DIR)/corporate-ca.pem; \
+	elif [ -n "$(CA_BUNDLE_PATH)" ]; then \
+		cp "$(CA_BUNDLE_PATH)" $(IMAGE_TEMP_DIR)/corporate-ca.pem; \
+	else \
+		: > $(IMAGE_TEMP_DIR)/corporate-ca.pem; \
+	fi || $(FAIL)
 	@docker buildx build $(BUILD_ARGS) \
 		--platform $(IMAGE_PLATFORMS) \
 		--build-arg CROSSPLANE_PROVIDER_VERSION=$(VERSION) \
